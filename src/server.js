@@ -3,13 +3,19 @@
 // ─────────────────────────────────────────────────────────────
 import 'dotenv/config';
 import express from 'express';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { handleMessage } from './index.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(express.json());
+app.use(express.static(join(__dirname, '..', 'public')));
 
 // ── API Routes ──────────────────────────────────────────────
 

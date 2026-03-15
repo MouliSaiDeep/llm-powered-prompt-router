@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────────────────────
 // router.test.js — Vitest tests for the Prompt Router
 // ─────────────────────────────────────────────────────────────
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import 'dotenv/config';
 import { SUPPORTED_INTENTS, EXPERT_PROMPTS, CLASSIFIER_PROMPT } from '../src/prompts.js';
 import { classifyIntent } from '../src/classifier.js';
@@ -137,6 +137,15 @@ describe('routeAndRespond', () => {
 describe('logRoute', () => {
   const logFile = join(process.cwd(), 'route_log.jsonl');
 
+  // Clean up log file before each test to avoid flaky assertions
+  beforeEach(async () => {
+    try {
+      await unlink(logFile);
+    } catch {
+      // File may not exist yet — that's fine
+    }
+  });
+
   it('should append a valid JSON line to the log file', async () => {
     const entry = {
       intent: 'code',
@@ -149,13 +158,25 @@ describe('logRoute', () => {
 
     const content = await readFile(logFile, 'utf-8');
     const lines = content.trim().split('\n');
-    const lastLine = JSON.parse(lines[lines.length - 1]);
+    expect(lines).toHaveLength(1);
+    const parsed = JSON.parse(lines[0]);
 
-    expect(lastLine).toHaveProperty('intent', 'code');
-    expect(lastLine).toHaveProperty('confidence', 0.95);
-    expect(lastLine).toHaveProperty('user_message', 'test message for logger');
-    expect(lastLine).toHaveProperty('final_response', 'test response');
-    expect(lastLine).toHaveProperty('timestamp');
+    expect(parsed).toHaveProperty('intent', 'code');
+    expect(parsed).toHaveProperty('confidence', 0.95);
+    expect(parsed).toHaveProperty('user_message', 'test message for logger');
+    expect(parsed).toHaveProperty('final_response', 'test response');
+    expect(parsed).toHaveProperty('timestamp');
+  });
+
+  it('should append multiple entries on separate lines', async () => {
+    await logRoute({ intent: 'code', confidence: 0.9, user_message: 'msg1', final_response: 'res1' });
+    await logRoute({ intent: 'data', confidence: 0.8, user_message: 'msg2', final_response: 'res2' });
+
+    const content = await readFile(logFile, 'utf-8');
+    const lines = content.trim().split('\n');
+    expect(lines).toHaveLength(2);
+    expect(JSON.parse(lines[0]).intent).toBe('code');
+    expect(JSON.parse(lines[1]).intent).toBe('data');
   });
 });
 
@@ -177,4 +198,23 @@ describe('handleMessage (end-to-end)', () => {
     expect(result.overridden).toBe(true);
     expect(typeof result.response).toBe('string');
   }, 30000);
+});
+
+// ── Parameterized classification tests over all test messages ─
+describe('classifyIntent — full test message suite', () => {
+  for (const { message, expected } of TEST_MESSAGES) {
+    // Skip empty messages (those will fail at the API level, not the classifier)
+    if (!message) continue;
+
+    it(`should classify "${message.slice(0, 50)}${message.length > 50 ? '...' : ''}" as "${expected}"`, async () => {
+      const result = await classifyIntent(message);
+      expect(SUPPORTED_INTENTS).toContain(result.intent);
+      expect(typeof result.confidence).toBe('number');
+
+      // For clear-intent messages, verify the classification matches
+      if (expected !== 'unclear') {
+        expect(result.intent).toBe(expected);
+      }
+    }, 15000);
+  }
 });

@@ -61,8 +61,6 @@ LLM-Powered-Prompt-Generator/
 ├── Dockerfile              # Production container image
 ├── docker-compose.yml      # Docker Compose config
 ├── package.json
-├── public/
-│   └── index.html          # Web UI (optional stretch goal)
 ├── src/
 │   ├── prompts.js          # All expert system prompts + classifier prompt
 │   ├── classifier.js       # classify_intent() — LLM classification
