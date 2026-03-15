@@ -1,0 +1,23 @@
+{
+  "name": "llm-powered-prompt-router",
+  "version": "1.0.0",
+  "description": "An intelligent prompt router that classifies user intent and delegates to specialized AI personas",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": ["llm", "prompt-routing", "ai", "gemini"],
+  "license": "MIT",
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.8"
+  }
+}
