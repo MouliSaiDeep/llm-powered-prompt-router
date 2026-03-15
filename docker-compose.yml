@@ -1,0 +1,10 @@
+services:
+  prompt-router:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./route_log.jsonl:/app/route_log.jsonl
+    restart: unless-stopped
