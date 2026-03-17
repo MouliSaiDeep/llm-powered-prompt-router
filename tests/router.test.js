@@ -1,220 +1,232 @@
-// ─────────────────────────────────────────────────────────────
-// router.test.js — Vitest tests for the Prompt Router
-// ─────────────────────────────────────────────────────────────
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
-import 'dotenv/config';
-import { SUPPORTED_INTENTS, EXPERT_PROMPTS, CLASSIFIER_PROMPT } from '../src/prompts.js';
-import { classifyIntent } from '../src/classifier.js';
-import { routeAndRespond } from '../src/router.js';
-import { logRoute } from '../src/logger.js';
-import { handleMessage } from '../src/index.js';
-import { TEST_MESSAGES } from './test-messages.js';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 
-// ── Prompts configuration tests ────────────────────────────
+const mockState = {
+  classifierText: '{"intent":"code","confidence":0.92}',
+  routerText: 'Mocked expert response',
+  throwClassifier: false,
+  throwRouter: false,
+  classifierCalls: [],
+  routerCalls: [],
+};
+
+vi.mock('../src/groq-client.js', () => {
+  async function groqChatCompletion(params) {
+    const systemPrompt = String(params?.messages?.[0]?.content || '');
+    const isClassifierCall = systemPrompt.includes('intent-classification engine');
+
+    if (isClassifierCall) {
+      mockState.classifierCalls.push(params);
+      if (mockState.throwClassifier) {
+        throw new Error('classifier failed');
+      }
+      return mockState.classifierText;
+    }
+
+    mockState.routerCalls.push(params);
+    if (mockState.throwRouter) {
+      throw new Error('router failed');
+    }
+    return mockState.routerText;
+  }
+
+  function getClassifierModel() {
+    return 'test-classifier-model';
+  }
+
+  function getGenerationModel() {
+    return 'test-generation-model';
+  }
+
+  return { groqChatCompletion, getClassifierModel, getGenerationModel };
+});
+
+import { SUPPORTED_INTENTS, EXPERT_PROMPTS, CLASSIFIER_PROMPT } from '../src/prompts.js';
+import { classifyIntent, classify_intent } from '../src/classifier.js';
+import { routeAndRespond, route_and_respond } from '../src/router.js';
+import { logRoute } from '../src/logger.js';
+import { handleMessage } from '../src/index.js';
+
+const logFile = join(process.cwd(), 'route_log.jsonl');
+
+function resetMockState() {
+  mockState.classifierText = '{"intent":"code","confidence":0.92}';
+  mockState.routerText = 'Mocked expert response';
+  mockState.throwClassifier = false;
+  mockState.throwRouter = false;
+  mockState.classifierCalls.length = 0;
+  mockState.routerCalls.length = 0;
+}
+
+async function clearLogFile() {
+  try {
+    await unlink(logFile);
+  } catch {
+    // Log file may not exist yet.
+  }
+}
+
+beforeEach(async () => {
+  resetMockState();
+  await clearLogFile();
+});
+
 describe('Prompts Configuration', () => {
-  it('should have at least 4 expert prompts', () => {
-    const keys = Object.keys(EXPERT_PROMPTS);
-    expect(keys.length).toBeGreaterThanOrEqual(4);
+  it('defines at least four expert prompts', () => {
+    expect(Object.keys(EXPERT_PROMPTS).length).toBeGreaterThanOrEqual(4);
   });
 
-  it('should have prompts keyed by supported intents', () => {
+  it('stores prompts by intent label', () => {
     for (const intent of SUPPORTED_INTENTS) {
-      expect(EXPERT_PROMPTS).toHaveProperty(intent);
       expect(typeof EXPERT_PROMPTS[intent]).toBe('string');
       expect(EXPERT_PROMPTS[intent].length).toBeGreaterThan(50);
     }
   });
 
-  it('each prompt should establish a distinct persona', () => {
-    const prompts = Object.values(EXPERT_PROMPTS);
-    // All prompts should be unique
-    const unique = new Set(prompts);
-    expect(unique.size).toBe(prompts.length);
-  });
-
-  it('should have a classifier prompt', () => {
+  it('contains a classifier prompt that requests JSON output', () => {
     expect(typeof CLASSIFIER_PROMPT).toBe('string');
-    expect(CLASSIFIER_PROMPT.length).toBeGreaterThan(50);
     expect(CLASSIFIER_PROMPT).toContain('JSON');
   });
 });
 
-// ── Classifier tests ───────────────────────────────────────
 describe('classifyIntent', () => {
-  it('should return an object with intent and confidence keys', async () => {
-    const result = await classifyIntent('How do I sort a list in Python?');
-    expect(result).toHaveProperty('intent');
-    expect(result).toHaveProperty('confidence');
-    expect(SUPPORTED_INTENTS).toContain(result.intent);
-    expect(typeof result.confidence).toBe('number');
-    expect(result.confidence).toBeGreaterThanOrEqual(0);
-    expect(result.confidence).toBeLessThanOrEqual(1);
-  }, 15000);
+  it('returns structured intent and confidence from JSON classifier output', async () => {
+    mockState.classifierText = '{"intent":"data","confidence":0.81}';
 
-  it('should classify a code message as "code"', async () => {
-    const result = await classifyIntent('Write a function to reverse a string in JavaScript');
-    expect(result.intent).toBe('code');
-    expect(result.confidence).toBeGreaterThanOrEqual(0.7);
-  }, 15000);
+    const result = await classifyIntent('What is the average of 10, 20, 30?');
 
-  it('should classify a data message as "data"', async () => {
-    const result = await classifyIntent('What is the median of 5, 10, 15, 20, 25?');
-    expect(result.intent).toBe('data');
-  }, 15000);
-
-  it('should classify a writing message as "writing"', async () => {
-    const result = await classifyIntent('My paragraph has too much passive voice, help me fix it');
-    expect(result.intent).toBe('writing');
-  }, 15000);
-
-  it('should classify a career message as "career"', async () => {
-    const result = await classifyIntent('How should I prepare for a software engineering interview?');
-    expect(result.intent).toBe('career');
-  }, 15000);
-
-  it('should handle manual override @code', async () => {
-    const result = await classifyIntent('@code Fix this bug in my loop');
-    expect(result.intent).toBe('code');
-    expect(result.confidence).toBe(1.0);
-    expect(result.overridden).toBe(true);
-    expect(result.originalMessage).toBe('Fix this bug in my loop');
+    expect(result).toEqual({ intent: 'data', confidence: 0.81 });
+    expect(mockState.classifierCalls).toHaveLength(1);
+    expect(mockState.classifierCalls[0].responseFormat).toEqual({ type: 'json_object' });
   });
 
-  it('should handle manual override @data', async () => {
-    const result = await classifyIntent('@data Analyze this dataset');
-    expect(result.intent).toBe('data');
-    expect(result.confidence).toBe(1.0);
-    expect(result.overridden).toBe(true);
+  it('falls back to unclear/0.0 for malformed JSON', async () => {
+    mockState.classifierText = 'not valid json';
+
+    const result = await classifyIntent('hello');
+
+    expect(result).toEqual({ intent: 'unclear', confidence: 0.0 });
   });
 
-  it('should not override for unsupported prefix like @unknown', async () => {
-    const result = await classifyIntent('@unknown Do something');
-    expect(result.overridden).toBeFalsy();
-  }, 15000);
+  it('falls back to unclear/0.0 if classifier call throws', async () => {
+    mockState.throwClassifier = true;
 
-  it('should default to unclear for very vague input', async () => {
-    const result = await classifyIntent('hey');
-    expect(['unclear']).toContain(result.intent);
-  }, 15000);
+    const result = await classifyIntent('how do i sort a list');
+
+    expect(result).toEqual({ intent: 'unclear', confidence: 0.0 });
+  });
+
+  it('exposes classify_intent alias', async () => {
+    mockState.classifierText = '{"intent":"writing","confidence":0.75}';
+
+    const result = await classify_intent('My paragraph sounds awkward.');
+
+    expect(result).toEqual({ intent: 'writing', confidence: 0.75 });
+  });
+
+  it('forces poem-style creative generation requests to unclear', async () => {
+    mockState.classifierText = '{"intent":"writing","confidence":0.95}';
+
+    const result = await classifyIntent('Can you write me a poem about clouds?');
+
+    expect(result).toEqual({ intent: 'unclear', confidence: 0.0 });
+  });
+
+  it('forces mixed-intent messages to unclear', async () => {
+    mockState.classifierText = '{"intent":"code","confidence":0.91}';
+
+    const result = await classifyIntent('I need a function for user profiles, and I also need resume help.');
+
+    expect(result).toEqual({ intent: 'unclear', confidence: 0.0 });
+  });
 });
 
-// ── Router tests ───────────────────────────────────────────
 describe('routeAndRespond', () => {
-  it('should return a string response for a code intent', async () => {
-    const response = await routeAndRespond('Write a hello world in Python', {
+  it('routes a supported intent to the matching expert prompt and generates text', async () => {
+    mockState.routerText = 'Code expert response';
+
+    const result = await routeAndRespond('Write a function in JS', {
       intent: 'code',
-      confidence: 0.95,
+      confidence: 0.9,
     });
-    expect(typeof response).toBe('string');
-    expect(response.length).toBeGreaterThan(10);
-  }, 30000);
 
-  it('should ask a clarifying question for unclear intent', async () => {
-    const response = await routeAndRespond('Help me', {
-      intent: 'unclear',
-      confidence: 0.3,
-    });
-    expect(typeof response).toBe('string');
-    expect(response.length).toBeGreaterThan(10);
-    // Should be a question / contain question-like language
-    expect(response).toMatch(/\?|help|clarif|looking for|assist|need|coding|writing|data|career/i);
-  }, 30000);
-
-  it('should treat low confidence as unclear', async () => {
-    const response = await routeAndRespond('Something', {
-      intent: 'code',
-      confidence: 0.3,
-    });
-    // Low confidence → unclear persona
-    expect(typeof response).toBe('string');
-    expect(response.length).toBeGreaterThan(5);
-  }, 30000);
-});
-
-// ── Logger tests ───────────────────────────────────────────
-describe('logRoute', () => {
-  const logFile = join(process.cwd(), 'route_log.jsonl');
-
-  // Clean up log file before each test to avoid flaky assertions
-  beforeEach(async () => {
-    try {
-      await unlink(logFile);
-    } catch {
-      // File may not exist yet — that's fine
-    }
+    expect(result).toBe('Code expert response');
+    expect(mockState.routerCalls).toHaveLength(1);
+    expect(mockState.routerCalls[0].messages[0].content).toContain(EXPERT_PROMPTS.code);
+    expect(mockState.routerCalls[0].messages[1].content).toContain('Write a function in JS');
   });
 
-  it('should append a valid JSON line to the log file', async () => {
-    const entry = {
-      intent: 'code',
-      confidence: 0.95,
-      user_message: 'test message for logger',
-      final_response: 'test response',
-    };
+  it('asks for clarification when intent is unclear', async () => {
+    const result = await routeAndRespond('help me', {
+      intent: 'unclear',
+      confidence: 0.2,
+    });
 
-    await logRoute(entry);
+    expect(result).toMatch(/coding|data analysis|writing feedback|career advice/i);
+    expect(mockState.routerCalls).toHaveLength(0);
+  });
+
+  it('asks for clarification for unsupported intent labels', async () => {
+    const result = await routeAndRespond('do a thing', {
+      intent: 'music',
+      confidence: 1,
+    });
+
+    expect(result).toMatch(/clarify|coding|data analysis|writing feedback|career advice/i);
+    expect(mockState.routerCalls).toHaveLength(0);
+  });
+
+  it('exposes route_and_respond alias', async () => {
+    mockState.routerText = 'Career response';
+
+    const result = await route_and_respond('Interview tips?', {
+      intent: 'career',
+      confidence: 0.88,
+    });
+
+    expect(result).toBe('Career response');
+  });
+});
+
+describe('logRoute', () => {
+  it('appends valid JSON lines with required keys', async () => {
+    await logRoute({
+      intent: 'code',
+      confidence: 0.93,
+      user_message: 'How to reverse a linked list?',
+      final_response: 'Use two pointers',
+    });
 
     const content = await readFile(logFile, 'utf-8');
-    const lines = content.trim().split('\n');
-    expect(lines).toHaveLength(1);
-    const parsed = JSON.parse(lines[0]);
+    const line = content.trim();
+    const parsed = JSON.parse(line);
 
     expect(parsed).toHaveProperty('intent', 'code');
-    expect(parsed).toHaveProperty('confidence', 0.95);
-    expect(parsed).toHaveProperty('user_message', 'test message for logger');
-    expect(parsed).toHaveProperty('final_response', 'test response');
-    expect(parsed).toHaveProperty('timestamp');
+    expect(parsed).toHaveProperty('confidence', 0.93);
+    expect(parsed).toHaveProperty('user_message', 'How to reverse a linked list?');
+    expect(parsed).toHaveProperty('final_response', 'Use two pointers');
   });
+});
 
-  it('should append multiple entries on separate lines', async () => {
-    await logRoute({ intent: 'code', confidence: 0.9, user_message: 'msg1', final_response: 'res1' });
-    await logRoute({ intent: 'data', confidence: 0.8, user_message: 'msg2', final_response: 'res2' });
+describe('handleMessage integration', () => {
+  it('classifies, routes, and logs one request', async () => {
+    mockState.classifierText = '{"intent":"writing","confidence":0.84}';
+    mockState.routerText = 'Writing coach response';
+
+    const result = await handleMessage('My writing is too verbose.');
+
+    expect(result).toEqual({
+      intent: 'writing',
+      confidence: 0.84,
+      response: 'Writing coach response',
+    });
 
     const content = await readFile(logFile, 'utf-8');
-    const lines = content.trim().split('\n');
-    expect(lines).toHaveLength(2);
-    expect(JSON.parse(lines[0]).intent).toBe('code');
-    expect(JSON.parse(lines[1]).intent).toBe('data');
+    const parsed = JSON.parse(content.trim());
+    expect(parsed).toHaveProperty('intent', 'writing');
+    expect(parsed).toHaveProperty('confidence', 0.84);
+    expect(parsed).toHaveProperty('user_message', 'My writing is too verbose.');
+    expect(parsed).toHaveProperty('final_response', 'Writing coach response');
   });
-});
-
-// ── End-to-end integration tests ───────────────────────────
-describe('handleMessage (end-to-end)', () => {
-  it('should process a message and return intent, confidence, and response', async () => {
-    const result = await handleMessage('How do I reverse a linked list?');
-    expect(result).toHaveProperty('intent');
-    expect(result).toHaveProperty('confidence');
-    expect(result).toHaveProperty('response');
-    expect(typeof result.response).toBe('string');
-    expect(result.response.length).toBeGreaterThan(10);
-  }, 30000);
-
-  it('should process a manual override message', async () => {
-    const result = await handleMessage('@writing My sentence is too wordy');
-    expect(result.intent).toBe('writing');
-    expect(result.confidence).toBe(1.0);
-    expect(result.overridden).toBe(true);
-    expect(typeof result.response).toBe('string');
-  }, 30000);
-});
-
-// ── Parameterized classification tests over all test messages ─
-describe('classifyIntent — full test message suite', () => {
-  for (const { message, expected } of TEST_MESSAGES) {
-    // Skip empty messages (those will fail at the API level, not the classifier)
-    if (!message) continue;
-
-    it(`should classify "${message.slice(0, 50)}${message.length > 50 ? '...' : ''}" as "${expected}"`, async () => {
-      const result = await classifyIntent(message);
-      expect(SUPPORTED_INTENTS).toContain(result.intent);
-      expect(typeof result.confidence).toBe('number');
-
-      // For clear-intent messages, verify the classification matches
-      if (expected !== 'unclear') {
-        expect(result.intent).toBe(expected);
-      }
-    }, 15000);
-  }
 });

@@ -9,17 +9,14 @@ import { logRoute } from './logger.js';
  * Process a single user message end-to-end.
  *
  * @param {string} message - Raw user message.
- * @returns {Promise<{ intent: string, confidence: number, overridden: boolean, response: string }>}
+ * @returns {Promise<{ intent: string, confidence: number, response: string }>}
  */
 export async function handleMessage(message) {
   // Step 1 — Classify the intent
   const classification = await classifyIntent(message);
 
   // Step 2 — Route to the expert and generate a response
-  const response = await routeAndRespond(
-    classification.originalMessage,
-    classification,
-  );
+  const response = await routeAndRespond(message, classification);
 
   // Step 3 — Log the routing decision
   await logRoute({
@@ -32,7 +29,6 @@ export async function handleMessage(message) {
   return {
     intent: classification.intent,
     confidence: classification.confidence,
-    overridden: classification.overridden,
     response,
   };
 }

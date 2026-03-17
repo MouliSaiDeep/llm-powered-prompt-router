@@ -10,10 +10,14 @@
     "test": "vitest run",
     "test:watch": "vitest"
   },
-  "keywords": ["llm", "prompt-routing", "ai", "gemini"],
+  "keywords": [
+    "llm",
+    "prompt-routing",
+    "ai",
+    "groq"
+  ],
   "license": "MIT",
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2"
   },

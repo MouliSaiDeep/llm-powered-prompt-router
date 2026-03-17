@@ -1,20 +1,8 @@
 // ─────────────────────────────────────────────────────────────
 // router.js — Route to expert persona and generate response
 // ─────────────────────────────────────────────────────────────
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import { EXPERT_PROMPTS } from './prompts.js';
-
-// Lazily initialised Gemini client for generation
-let model = null;
-
-function getModel() {
-  if (!model) {
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    // Use a capable model for high-quality generation
-    model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-  }
-  return model;
-}
+import { EXPERT_PROMPTS, SUPPORTED_INTENTS } from './prompts.js';
+import { getGenerationModel, groqChatCompletion } from './groq-client.js';
 
 /**
  * Route the user message to the correct expert persona and generate a response.
@@ -24,34 +12,37 @@ function getModel() {
  * @returns {Promise<string>} - The final generated response text.
  */
 export async function routeAndRespond(message, classification) {
-  const threshold = parseFloat(process.env.CONFIDENCE_THRESHOLD) || 0.7;
+  const requestedIntent = classification?.intent;
+  const effectiveIntent = SUPPORTED_INTENTS.includes(requestedIntent)
+    ? requestedIntent
+    : 'unclear';
 
-  // Determine effective intent (apply confidence threshold)
-  const effectiveIntent =
-    classification.intent === 'unclear' || classification.confidence < threshold
-      ? 'unclear'
-      : classification.intent;
+  if (effectiveIntent === 'unclear') {
+    return 'Could you clarify what kind of help you want: coding, data analysis, writing feedback, or career advice?';
+  }
 
   const systemPrompt = EXPERT_PROMPTS[effectiveIntent];
 
   if (!systemPrompt) {
-    // Safety net — should never happen if prompts.js is correct
-    return `I'm sorry, I encountered an internal routing error. Could you try rephrasing your question?`;
+    return 'Could you clarify what kind of help you want: coding, data analysis, writing feedback, or career advice?';
   }
 
   try {
-    const generationModel = getModel();
-    const chat = generationModel.startChat({
-      history: [
-        { role: 'user', parts: [{ text: systemPrompt }] },
-        { role: 'model', parts: [{ text: 'Understood. I will follow those instructions precisely.' }] },
+    const responseText = await groqChatCompletion({
+      model: getGenerationModel(),
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: message },
       ],
+      temperature: 0.4,
+      maxTokens: 1200,
     });
-
-    const result = await chat.sendMessage(message);
-    return result.response.text();
+    return responseText;
   } catch (error) {
     console.error('[router] Error generating response:', error.message);
-    return `I'm sorry, something went wrong while generating your response. Please try again.`;
+    return 'I had trouble generating a response. Please try again.';
   }
 }
+
+// Snake_case alias for requirements parity/documentation consistency.
+export const route_and_respond = routeAndRespond;

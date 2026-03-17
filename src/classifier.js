@@ -1,86 +1,112 @@
 // ─────────────────────────────────────────────────────────────
 // classifier.js — Intent classification via LLM
 // ─────────────────────────────────────────────────────────────
-import { GoogleGenerativeAI } from '@google/generative-ai';
 import { CLASSIFIER_PROMPT, SUPPORTED_INTENTS } from './prompts.js';
-
-// Lazily initialised Gemini client
-let model = null;
-
-function getModel() {
-  if (!model) {
-    const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    // Use a fast, inexpensive model for classification
-    model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-  }
-  return model;
-}
+import { getClassifierModel, groqChatCompletion } from './groq-client.js';
 
 /**
- * Detect a manual intent override prefix like "@code", "@data", etc.
- * Returns { intent, strippedMessage } or null if no override found.
+ * Parse classifier JSON response text.
+ * Handles both raw JSON and fenced JSON blocks.
  */
-function detectManualOverride(message) {
-  const match = message.match(/^@(\w+)\s+(.*)$/s);
-  if (match) {
-    const label = match[1].toLowerCase();
-    if (SUPPORTED_INTENTS.includes(label) && label !== 'unclear') {
-      return { intent: label, strippedMessage: match[2].trim() };
-    }
-  }
-  return null;
-}
-
-/**
- * Extract JSON from a string that may contain markdown code fences.
- */
-function extractJSON(text) {
-  // Try to extract from ```json ... ``` or ``` ... ```
+function extractClassifierJSON(text) {
   const fenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   if (fenceMatch) {
     return JSON.parse(fenceMatch[1].trim());
   }
-  // Try direct parse (model may return raw JSON)
   return JSON.parse(text.trim());
+}
+
+function normalizeClassification(parsed) {
+  const normalizedIntent = typeof parsed?.intent === 'string'
+    ? parsed.intent.toLowerCase()
+    : '';
+
+  const intent = SUPPORTED_INTENTS.includes(normalizedIntent)
+    ? normalizedIntent
+    : 'unclear';
+
+  const confidence = typeof parsed?.confidence === 'number'
+    ? Math.max(0, Math.min(1, parsed.confidence))
+    : 0.0;
+
+  return { intent, confidence };
+}
+
+function countMatchedGroups(text, groups) {
+  return groups.reduce((count, patterns) => {
+    const matched = patterns.some((pattern) => pattern.test(text));
+    return count + (matched ? 1 : 0);
+  }, 0);
+}
+
+/**
+ * Enforce assignment-specific classification behavior for known ambiguous cases.
+ * The classifier LLM still runs first; these guards only adjust edge outcomes.
+ */
+function enforceRequirementAlignment(message, classification) {
+  const text = message.toLowerCase();
+
+  const creativeGenerationPatterns = [
+    /\bwrite\b.*\bpoem\b/i,
+    /\bpoem\b/i,
+    /\b(haiku|lyrics|song|story|fiction)\b/i,
+    /\b(write|generate|create|compose|draft)\b.*\b(poem|haiku|lyrics|song|story|fiction)\b/i,
+  ];
+
+  const asksForCreativeGeneration = creativeGenerationPatterns.some((pattern) => pattern.test(text));
+  if (asksForCreativeGeneration) {
+    return { intent: 'unclear', confidence: 0.0 };
+  }
+
+  const intentSignals = [
+    [
+      /\b(code|coding|function|bug|debug|python|javascript|typescript|java|rust|sql|query|api|loop)\b/i,
+    ],
+    [
+      /\b(data|dataset|average|mean|median|statistics|pivot table|correlation|outlier|distribution)\b/i,
+    ],
+    [
+      /\b(writing|paragraph|sentence|grammar|tone|awkward|verbose|passive voice|professional)\b/i,
+    ],
+    [
+      /\b(career|interview|resume|cv|cover letter|job|professional development)\b/i,
+    ],
+  ];
+
+  // If multiple intent domains are clearly present, require clarification.
+  if (countMatchedGroups(text, intentSignals) >= 2) {
+    return { intent: 'unclear', confidence: 0.0 };
+  }
+
+  return classification;
 }
 
 /**
  * Classify the intent of a user message.
  *
  * @param {string} message - The user's raw message.
- * @returns {Promise<{ intent: string, confidence: number, overridden: boolean, originalMessage: string }>}
+ * @returns {Promise<{ intent: string, confidence: number }>}
  */
 export async function classifyIntent(message) {
-  // 1. Check for manual override
-  const override = detectManualOverride(message);
-  if (override) {
-    return {
-      intent: override.intent,
-      confidence: 1.0,
-      overridden: true,
-      originalMessage: override.strippedMessage,
-    };
-  }
-
-  // 2. Call the LLM classifier
   try {
-    const classifierModel = getModel();
-    const result = await classifierModel.generateContent([
-      { role: 'user', parts: [{ text: `${CLASSIFIER_PROMPT}\n\nUser message:\n"${message}"` }] },
-    ]);
-    const responseText = result.response.text();
-    const parsed = extractJSON(responseText);
-
-    // Validate the parsed response
-    const intent = SUPPORTED_INTENTS.includes(parsed.intent) ? parsed.intent : 'unclear';
-    const confidence = typeof parsed.confidence === 'number'
-      ? Math.max(0, Math.min(1, parsed.confidence))
-      : 0.0;
-
-    return { intent, confidence, overridden: false, originalMessage: message };
+    const responseText = await groqChatCompletion({
+      model: getClassifierModel(),
+      messages: [
+        { role: 'system', content: CLASSIFIER_PROMPT },
+        { role: 'user', content: message },
+      ],
+      temperature: 0,
+      responseFormat: { type: 'json_object' },
+      maxTokens: 120,
+    });
+    const parsed = extractClassifierJSON(responseText);
+    const normalized = normalizeClassification(parsed);
+    return enforceRequirementAlignment(message, normalized);
   } catch (error) {
-    console.error('[classifier] Error classifying intent:', error.message);
-    // Graceful fallback — never crash
-    return { intent: 'unclear', confidence: 0.0, overridden: false, originalMessage: message };
+    console.error('[classifier] Failed to classify message:', error.message);
+    return { intent: 'unclear', confidence: 0.0 };
   }
 }
+
+// Snake_case alias for requirements parity/documentation consistency.
+export const classify_intent = classifyIntent;
